@@ -50,6 +50,7 @@
 #include "wayland-relative-pointer-unstable-v1-client-protocol.h"
 #include "wayland-pointer-constraints-unstable-v1-client-protocol.h"
 #include "wayland-idle-inhibit-unstable-v1-client-protocol.h"
+#include "wayland-fractional-scale-v1-client-protocol.h"
 
 #define GLFW_BORDER_SIZE    4
 #define GLFW_CAPTION_HEIGHT 24
@@ -192,7 +193,8 @@ static struct wl_buffer* createShmBuffer(const GLFWimage* image)
     return buffer;
 }
 
-static void createFallbackDecoration(_GLFWdecorationWayland* decoration,
+static void createFallbackDecoration(_GLFWwindow *window,
+                                     _GLFWdecorationWayland* decoration,
                                      struct wl_surface* parent,
                                      struct wl_buffer* buffer,
                                      int x, int y,
@@ -228,19 +230,19 @@ static void createFallbackDecorations(_GLFWwindow* window)
     if (!window->wl.decorations.buffer)
         return;
 
-    createFallbackDecoration(&window->wl.decorations.top, window->wl.surface,
+    createFallbackDecoration(window, &window->wl.decorations.top, window->wl.surface,
                              window->wl.decorations.buffer,
                              0, -GLFW_CAPTION_HEIGHT,
                              window->wl.width, GLFW_CAPTION_HEIGHT);
-    createFallbackDecoration(&window->wl.decorations.left, window->wl.surface,
+    createFallbackDecoration(window, &window->wl.decorations.left, window->wl.surface,
                              window->wl.decorations.buffer,
                              -GLFW_BORDER_SIZE, -GLFW_CAPTION_HEIGHT,
                              GLFW_BORDER_SIZE, window->wl.height + GLFW_CAPTION_HEIGHT);
-    createFallbackDecoration(&window->wl.decorations.right, window->wl.surface,
+    createFallbackDecoration(window, &window->wl.decorations.right, window->wl.surface,
                              window->wl.decorations.buffer,
                              window->wl.width, -GLFW_CAPTION_HEIGHT,
                              GLFW_BORDER_SIZE, window->wl.height + GLFW_CAPTION_HEIGHT);
-    createFallbackDecoration(&window->wl.decorations.bottom, window->wl.surface,
+    createFallbackDecoration(window, &window->wl.decorations.bottom, window->wl.surface,
                              window->wl.decorations.buffer,
                              -GLFW_BORDER_SIZE, window->wl.height,
                              window->wl.width + GLFW_BORDER_SIZE * 2, GLFW_BORDER_SIZE);
@@ -306,9 +308,9 @@ static void setContentAreaOpaque(_GLFWwindow* window)
 
 static void resizeWindow(_GLFWwindow* window)
 {
-    int scale = window->wl.scale;
-    int scaledWidth = window->wl.width * scale;
-    int scaledHeight = window->wl.height * scale;
+    int integerScale = window->wl.integerScale;
+    int scaledWidth = window->wl.width * integerScale;
+    int scaledHeight = window->wl.height * integerScale;
 
     if (window->wl.egl.window)
         wl_egl_window_resize(window->wl.egl.window, scaledWidth, scaledHeight, 0, 0);
@@ -319,10 +321,16 @@ static void resizeWindow(_GLFWwindow* window)
     if (!window->wl.decorations.top.surface)
         return;
 
+    const uint32_t scale_8_24 = (uint32_t)(window->wl.fractionalScale * (double)(1UL << 24));
+
+    wl_subsurface_set_position(window->wl.decorations.top.subsurface,
+                               0, -GLFW_CAPTION_HEIGHT);
     wp_viewport_set_destination(window->wl.decorations.top.viewport,
                                 window->wl.width, GLFW_CAPTION_HEIGHT);
     wl_surface_commit(window->wl.decorations.top.surface);
 
+    wl_subsurface_set_position(window->wl.decorations.left.subsurface,
+                               -GLFW_BORDER_SIZE, -GLFW_CAPTION_HEIGHT);
     wp_viewport_set_destination(window->wl.decorations.left.viewport,
                                 GLFW_BORDER_SIZE, window->wl.height + GLFW_CAPTION_HEIGHT);
     wl_surface_commit(window->wl.decorations.left.surface);
@@ -340,9 +348,9 @@ static void resizeWindow(_GLFWwindow* window)
     wl_surface_commit(window->wl.decorations.bottom.surface);
 }
 
-void _glfwUpdateContentScaleWayland(_GLFWwindow* window)
+void _glfwUpdateIntegerContentScaleWayland(_GLFWwindow* window)
 {
-    if (_glfw.wl.compositorVersion < WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION)
+    if (_glfw.wl.compositorVersion < WL_SURFACE_SET_BUFFER_SCALE_SINCE_VERSION || window->wl.fractionalScaling)
         return;
 
     // Get the scale factor from the highest scale monitor.
@@ -352,9 +360,9 @@ void _glfwUpdateContentScaleWayland(_GLFWwindow* window)
         maxScale = _glfw_max(window->wl.monitors[i]->wl.scale, maxScale);
 
     // Only change the framebuffer size if the scale changed.
-    if (window->wl.scale != maxScale)
+    if (window->wl.integerScale != maxScale)
     {
-        window->wl.scale = maxScale;
+        window->wl.integerScale = maxScale;
         wl_surface_set_buffer_scale(window->wl.surface, maxScale);
         _glfwInputWindowContentScale(window, maxScale, maxScale);
         resizeWindow(window);
@@ -378,7 +386,7 @@ static void surfaceHandleEnter(void* userData,
 
     window->wl.monitors[window->wl.monitorsCount++] = monitor;
 
-    _glfwUpdateContentScaleWayland(window);
+    _glfwUpdateIntegerContentScaleWayland(window);
 }
 
 static void surfaceHandleLeave(void* userData,
@@ -398,13 +406,37 @@ static void surfaceHandleLeave(void* userData,
     }
     window->wl.monitors[--window->wl.monitorsCount] = NULL;
 
-    _glfwUpdateContentScaleWayland(window);
+    _glfwUpdateIntegerContentScaleWayland(window);
 }
 
 static const struct wl_surface_listener surfaceListener =
 {
     surfaceHandleEnter,
     surfaceHandleLeave
+};
+
+
+void handleScaleFactor(void *userData,
+                       struct wp_fractional_scale_v1 *wp_fractional_scale_v1,
+                       uint32_t scale_8_24)
+{
+    _GLFWwindow* window = userData;
+
+    const double oldScale = window->wl.fractionalScale;
+    const double newScale = scale_8_24 / (double)(1UL << 24);
+    if (newScale != oldScale) {
+        window->wl.fractionalScale = newScale;
+        _glfwInputWindowContentScale(window, newScale, newScale);
+        // keep the effective size of the window the same
+        window->wl.width = round(window->wl.width * newScale / oldScale);
+        window->wl.height = round(window->wl.height * newScale / oldScale);
+        resizeWindow(window);
+    }
+}
+
+static const struct wp_fractional_scale_v1_listener scaleListener =
+{
+    handleScaleFactor
 };
 
 static void setIdleInhibitor(_GLFWwindow* window, GLFWbool enable)
@@ -731,15 +763,23 @@ static GLFWbool createNativeSurface(_GLFWwindow* window,
 
     window->wl.width = wndconfig->width;
     window->wl.height = wndconfig->height;
-    window->wl.scale = 1;
+    window->wl.integerScale = 1;
     window->wl.title = _glfw_strdup(wndconfig->title);
     window->wl.appId = _glfw_strdup(wndconfig->wl.appId);
+
+    window->wl.fractionalScale = 1;
 
     window->wl.maximized = wndconfig->maximized;
 
     window->wl.transparent = fbconfig->transparent;
     if (!window->wl.transparent)
         setContentAreaOpaque(window);
+
+    if (_glfw.wl.fractionalScaleManager)
+    {
+        window->wl.fractionalScaling = wp_fractional_scale_manager_v1_get_fractional_scale(_glfw.wl.fractionalScaleManager, window->wl.surface);
+        wp_fractional_scale_v1_add_listener(window->wl.fractionalScaling, &scaleListener, window);
+    }
 
     return GLFW_TRUE;
 }
@@ -758,7 +798,7 @@ static void setCursorImage(_GLFWwindow* window,
         buffer = cursorWayland->buffer;
     else
     {
-        if (window->wl.scale > 1 && cursorWayland->cursorHiDPI)
+        if (window->wl.integerScale > 1 && cursorWayland->cursorHiDPI)
         {
             wlCursor = cursorWayland->cursorHiDPI;
             scale = 2;
@@ -1106,7 +1146,7 @@ static void setCursor(_GLFWwindow* window, const char* name)
     struct wl_cursor_theme* theme = _glfw.wl.cursorTheme;
     int scale = 1;
 
-    if (window->wl.scale > 1 && _glfw.wl.cursorThemeHiDPI)
+    if (window->wl.integerScale > 1 && _glfw.wl.cursorThemeHiDPI)
     {
         // We only support up to scale=2 for now, since libwayland-cursor
         // requires us to load a different theme for each size.
@@ -1995,10 +2035,13 @@ void _glfwSetWindowAspectRatioWayland(_GLFWwindow* window, int numer, int denom)
 void _glfwGetFramebufferSizeWayland(_GLFWwindow* window, int* width, int* height)
 {
     _glfwGetWindowSizeWayland(window, width, height);
-    if (width)
-        *width *= window->wl.scale;
-    if (height)
-        *height *= window->wl.scale;
+    if (!window->wl.fractionalScaling)
+    {
+        if (width)
+            *width *= window->wl.integerScale;
+        if (height)
+            *height *= window->wl.integerScale;
+    }
 }
 
 void _glfwGetWindowFrameSizeWayland(_GLFWwindow* window,
@@ -2021,10 +2064,17 @@ void _glfwGetWindowFrameSizeWayland(_GLFWwindow* window,
 void _glfwGetWindowContentScaleWayland(_GLFWwindow* window,
                                        float* xscale, float* yscale)
 {
-    if (xscale)
-        *xscale = (float) window->wl.scale;
-    if (yscale)
-        *yscale = (float) window->wl.scale;
+    if (window->wl.fractionalScaling) {
+        if (xscale)
+            *xscale = window->wl.fractionalScale;
+        if (yscale)
+            *yscale = window->wl.fractionalScale;
+    } else {
+        if (xscale)
+            *xscale = (float) window->wl.integerScale;
+        if (yscale)
+            *yscale = (float) window->wl.integerScale;
+    }
 }
 
 void _glfwIconifyWindowWayland(_GLFWwindow* window)
@@ -2466,13 +2516,13 @@ static void relativePointerHandleRelativeMotion(void* userData,
 
     if (window->rawMouseMotion)
     {
-        xpos += wl_fixed_to_double(dxUnaccel);
-        ypos += wl_fixed_to_double(dyUnaccel);
+        xpos += wl_fixed_to_double(dxUnaccel) / window->wl.fractionalScale;
+        ypos += wl_fixed_to_double(dyUnaccel) / window->wl.fractionalScale;
     }
     else
     {
-        xpos += wl_fixed_to_double(dx);
-        ypos += wl_fixed_to_double(dy);
+        xpos += wl_fixed_to_double(dx) / window->wl.fractionalScale;
+        ypos += wl_fixed_to_double(dy) / window->wl.fractionalScale;
     }
 
     _glfwInputCursorPos(window, xpos, ypos);

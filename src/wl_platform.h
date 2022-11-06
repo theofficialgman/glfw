@@ -212,6 +212,7 @@ typedef struct _GLFWdecorationWayland
     struct wl_surface*          surface;
     struct wl_subsurface*       subsurface;
     struct wp_viewport*         viewport;
+    struct wp_fractional_scale_v1* fractionalScale;
 } _GLFWdecorationWayland;
 
 typedef struct _GLFWofferWayland
@@ -262,7 +263,7 @@ typedef struct _GLFWwindowWayland
 
     // We need to track the monitors the window spans on to calculate the
     // optimal scaling factor.
-    int                         scale;
+    int                         integerScale;
     _GLFWmonitor**              monitors;
     int                         monitorsCount;
     int                         monitorsSize;
@@ -278,6 +279,9 @@ typedef struct _GLFWwindowWayland
         _GLFWdecorationWayland             top, left, right, bottom;
         _GLFWdecorationSideWayland         focus;
     } decorations;
+
+    double fractionalScale;
+    struct wp_fractional_scale_v1* fractionalScaling;
 } _GLFWwindowWayland;
 
 // Wayland-specific global data
@@ -300,6 +304,7 @@ typedef struct _GLFWlibraryWayland
     struct zwp_relative_pointer_manager_v1* relativePointerManager;
     struct zwp_pointer_constraints_v1*      pointerConstraints;
     struct zwp_idle_inhibit_manager_v1*     idleInhibitManager;
+    struct wp_fractional_scale_manager_v1*  fractionalScaleManager;
 
     _GLFWofferWayland*          offers;
     unsigned int                offerCount;
@@ -514,7 +519,7 @@ GLFWbool _glfwGetGammaRampWayland(_GLFWmonitor* monitor, GLFWgammaramp* ramp);
 void _glfwSetGammaRampWayland(_GLFWmonitor* monitor, const GLFWgammaramp* ramp);
 
 void _glfwAddOutputWayland(uint32_t name, uint32_t version);
-void _glfwUpdateContentScaleWayland(_GLFWwindow* window);
+void _glfwUpdateIntegerContentScaleWayland(_GLFWwindow* window);
 
 void _glfwAddSeatListenerWayland(struct wl_seat* seat);
 void _glfwAddDataDeviceListenerWayland(struct wl_data_device* device);

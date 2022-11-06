@@ -122,7 +122,7 @@ static void outputHandleScale(void* userData,
         {
             if (window->wl.monitors[i] == monitor)
             {
-                _glfwUpdateContentScaleWayland(window);
+                _glfwUpdateIntegerContentScaleWayland(window);
                 break;
             }
         }
